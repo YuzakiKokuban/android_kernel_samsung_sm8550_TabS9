@@ -29,13 +29,13 @@
 #include <linux/task_work.h>
 #include <linux/sched/task.h>
 #include <uapi/linux/mount.h>
-#include <linux/fs_context.h>
-#include <linux/shmem_fs.h>
-#include <linux/mnt_idmapping.h>
 #include <linux/fslog.h>
 #ifdef CONFIG_KDP_NS
 #include <linux/kdp.h>
 #endif
+#include <linux/fs_context.h>
+#include <linux/shmem_fs.h>
+#include <linux/mnt_idmapping.h>
 
 #include "pnode.h"
 #include "internal.h"
@@ -1205,13 +1205,7 @@ EXPORT_SYMBOL_GPL(vfs_submount);
 static struct mount *clone_mnt(struct mount *old, struct dentry *root,
 					int flag)
 {
-#ifdef CONFIG_KDP_NS
-	struct super_block *sb = ((struct kdp_mount *)old)->mnt->mnt_sb;
-	int nsflags;
-	struct user_namespace *userns;
-#else
 	struct super_block *sb = old->mnt.mnt_sb;
-#endif
 	struct mount *mnt;
 	int err;
 
@@ -1231,21 +1225,27 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
 	}
 
 #ifdef CONFIG_KDP_NS
-	nsflags = ((struct kdp_mount *)old)->mnt->mnt_flags;
-	nsflags &= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);
-	kdp_assign_mnt_flags(((struct kdp_mount *)mnt)->mnt, nsflags);
-	
-	atomic_inc(&sb->s_active);
+	{
+		int nsflags;
+		struct user_namespace *userns;
 
-	userns = mnt_user_ns(((struct kdp_mount *)old)->mnt);
-	kdp_set_mnt_userns(((struct kdp_mount *)mnt)->mnt, userns);
+		sb = ((struct kdp_mount *)old)->mnt->mnt_sb;
+		nsflags = ((struct kdp_mount *)old)->mnt->mnt_flags;
+		nsflags &= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);
+		kdp_assign_mnt_flags(((struct kdp_mount *)mnt)->mnt, nsflags);
 
-	if (!initial_idmapping(((struct kdp_mount *)mnt)->mnt->mnt_userns)) {
-		userns = get_user_ns(((struct kdp_mount *)mnt)->mnt->mnt_userns);
+		atomic_inc(&sb->s_active);
+
+		userns = mnt_user_ns(((struct kdp_mount *)old)->mnt);
 		kdp_set_mnt_userns(((struct kdp_mount *)mnt)->mnt, userns);
+
+		if (!initial_idmapping(((struct kdp_mount *)mnt)->mnt->mnt_userns)) {
+			userns = get_user_ns(((struct kdp_mount *)mnt)->mnt->mnt_userns);
+			kdp_set_mnt_userns(((struct kdp_mount *)mnt)->mnt, userns);
+		}
+		kdp_set_mnt_root_sb(((struct kdp_mount *)mnt)->mnt, dget(root), sb);
+		mnt->mnt_mountpoint = ((struct kdp_mount *)mnt)->mnt->mnt_root;
 	}
-	kdp_set_mnt_root_sb(((struct kdp_mount *)mnt)->mnt, dget(root), sb);
-	mnt->mnt_mountpoint = ((struct kdp_mount *)mnt)->mnt->mnt_root;
 #else
 	mnt->mnt.mnt_flags = old->mnt.mnt_flags;
 	mnt->mnt.mnt_flags &= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);
@@ -3872,11 +3872,7 @@ struct mnt_namespace *copy_mnt_ns(unsigned long flags, struct mnt_namespace *ns,
 	copy_flags = CL_COPY_UNBINDABLE | CL_EXPIRE;
 	if (user_ns != ns->user_ns)
 		copy_flags |= CL_SHARED_TO_SLAVE;
-#ifdef CONFIG_KDP_NS
-	new = copy_tree(old, ((struct kdp_mount *)old)->mnt->mnt_root, copy_flags);
-#else
 	new = copy_tree(old, old->mnt.mnt_root, copy_flags);
-#endif
 	if (IS_ERR(new)) {
 		namespace_unlock();
 		free_mnt_ns(new_ns);

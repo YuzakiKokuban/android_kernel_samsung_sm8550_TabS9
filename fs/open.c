@@ -1236,18 +1236,21 @@ static long do_sys_openat2(int dfd, const char __user *filename,
 	fd = get_unused_fd_flags(how->flags);
 	if (fd >= 0) {
 		struct file *f = do_filp_open(dfd, tmp, &op);
-#ifdef CONFIG_SECURITY_DEFEX
-		if (!IS_ERR(f) && task_defex_enforce(current, f, -__NR_openat)) {
-			fput(f);
-			f = ERR_PTR(-EPERM);
-		}
-#endif
 		if (IS_ERR(f)) {
 			put_unused_fd(fd);
 			fd = PTR_ERR(f);
 		} else {
-			fsnotify_open(f);
-			fd_install(fd, f);
+#ifdef CONFIG_SECURITY_DEFEX
+			if (task_defex_enforce(current, f, -__NR_openat)) {
+				fput(f);
+				put_unused_fd(fd);
+				fd = -EPERM;
+			} else
+#endif
+			{
+				fsnotify_open(f);
+				fd_install(fd, f);
+			}
 		}
 	}
 	putname(tmp);

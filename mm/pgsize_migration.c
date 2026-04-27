@@ -306,6 +306,7 @@ struct vm_area_struct *get_data_vma(struct vm_area_struct *vma)
 
 	/* Adjust the end to the start of the padding section */
 	data->vm_end = VMA_PAD_START(data);
+	data->vm_flags &= ~VM_PAD_MASK;
 
 	return data;
 }
@@ -319,12 +320,6 @@ void show_map_pad_vma(struct vm_area_struct *vma, struct vm_area_struct *pad,
 {
 	if (!pad)
 		return;
-
-	/*
-	 * This cannot happen. If @pad vma was allocated the corresponding
-	 * @vma should have the VM_PAD_MASK bit(s) set.
-	 */
-	BUG_ON(!(vma->vm_flags & VM_PAD_MASK));
 
 	/*
 	 * This cannot happen. @pad is a section of the original VMA.
