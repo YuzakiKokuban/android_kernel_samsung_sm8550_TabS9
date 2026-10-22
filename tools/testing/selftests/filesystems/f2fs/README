@@ -1,0 +1,34 @@
+F2FS legacy project quota compatibility test
+===========================================
+
+Build with:
+  make -C tools/testing/selftests TARGETS=filesystems/f2fs
+
+Run only inside an isolated VM with two fresh, disposable F2FS images mounted
+at separate mountpoints. The first image must lack project_quota; the second
+must have extra_attr, project_quota and quota. Neither image should enable
+compression. The runner does not format devices and is skipped unless opted in:
+
+  F2FS_COMPAT_TEST=1 ./run.sh /mnt/legacy /mnt/native
+
+The runner creates scratch directories and changes mount options. It leaves
+those directories behind, returns both filesystems to read/write mode, and
+disables legacy compatibility on the legacy mount. Use fresh images per run.
+Do not point it at userdata, application directories, or production volumes.
+
+Coverage includes strict rejection, mount-specific opt-in, honest project ID
+and inheritance readback, child inheritance, preservation of unrelated flags
+and errors, owner/non-owner permission boundaries, regular-file exclusion,
+read-only rejection, and successful/failed remount stress. Stress tests alone
+cannot prove freedom from remount races; the implementation snapshots a policy
+published only after successful mount/remount completion.
+
+The ioctl utility also supports verify-compat and verify-native modes, for
+checking the test directory after a complete unmount/mount or VM reboot:
+
+  ./project_quota_compat /mnt/legacy/f2fs-compat-test/compat verify-compat
+  ./project_quota_compat /mnt/native/f2fs-compat-test/native verify-native
+
+Expected legacy readback is project ID 0 with no inheritance flag. Expected
+native readback is project ID 12345 with inheritance enabled. This fallback
+does not implement project accounting or limits on a legacy filesystem.

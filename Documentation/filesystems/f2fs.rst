@@ -226,6 +226,21 @@ io_bits=%u		 Set the bit size of write IO requests. It should be set
 usrquota		 Enable plain user disk quota accounting.
 grpquota		 Enable plain group disk quota accounting.
 prjquota		 Enable plain project quota accounting.
+legacy_project_quota	 Opt in to directory project-ID compatibility on this
+			 mount only. On disks without the project_quota feature,
+			 callers with CAP_SYS_ADMIN in the initial user namespace
+			 may submit directory project IDs, but they are ignored.
+			 Project inheritance requests from those callers are also
+			 ignored, and the inheritance flag is cleared rather than
+			 stored. Other callers cannot use this fallback. Getters
+			 continue to report the attributes actually stored on disk.
+			 Project accounting and limits are unavailable; a warning
+			 is issued once per superblock when the fallback is used.
+			 Disks with project_quota retain their normal behavior,
+			 including errors for inodes missing required extra attrs.
+			 Default is off; explicitly select only the legacy volume
+			 requiring compatibility. The option survives remounts.
+nolegacy_project_quota	 Disable directory project-ID compatibility.
 usrjquota=<file>	 Appoint specified file and type during mount, so that quota
 grpjquota=<file>	 information can be properly updated during recovery flow,
 prjjquota=<file>	 <quota file>: must be in root directory;

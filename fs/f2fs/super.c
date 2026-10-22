@@ -160,6 +160,8 @@ enum {
 	Opt_checkpoint_enable,
 	Opt_checkpoint_merge,
 	Opt_nocheckpoint_merge,
+	Opt_legacy_project_quota,
+	Opt_nolegacy_project_quota,
 	Opt_compress_algorithm,
 	Opt_compress_log_size,
 	Opt_compress_extension,
@@ -239,6 +241,8 @@ static match_table_t f2fs_tokens = {
 	{Opt_checkpoint_enable, "checkpoint=enable"},
 	{Opt_checkpoint_merge, "checkpoint_merge"},
 	{Opt_nocheckpoint_merge, "nocheckpoint_merge"},
+	{Opt_legacy_project_quota, "legacy_project_quota"},
+	{Opt_nolegacy_project_quota, "nolegacy_project_quota"},
 	{Opt_compress_algorithm, "compress_algorithm=%s"},
 	{Opt_compress_log_size, "compress_log_size=%u"},
 	{Opt_compress_extension, "compress_extension=%s"},
@@ -1207,6 +1211,12 @@ static int parse_options(struct super_block *sb, char *options, bool is_remount)
 		case Opt_nocheckpoint_merge:
 			clear_opt(sbi, MERGE_CHECKPOINT);
 			break;
+		case Opt_legacy_project_quota:
+			set_opt(sbi, LEGACY_PROJECT_QUOTA);
+			break;
+		case Opt_nolegacy_project_quota:
+			clear_opt(sbi, LEGACY_PROJECT_QUOTA);
+			break;
 #ifdef CONFIG_F2FS_FS_COMPRESSION
 		case Opt_compress_algorithm:
 			if (!f2fs_sb_has_compression(sbi)) {
@@ -2042,6 +2052,9 @@ static int f2fs_show_options(struct seq_file *seq, struct dentry *root)
 {
 	struct f2fs_sb_info *sbi = F2FS_SB(root->d_sb);
 
+	if (test_opt(sbi, LEGACY_PROJECT_QUOTA))
+		seq_puts(seq, ",legacy_project_quota");
+
 	if (F2FS_OPTION(sbi).bggc_mode == BGGC_MODE_SYNC)
 		seq_printf(seq, ",background_gc=%s", "sync");
 	else if (F2FS_OPTION(sbi).bggc_mode == BGGC_MODE_ON)
@@ -2202,8 +2215,21 @@ static int f2fs_show_options(struct seq_file *seq, struct dentry *root)
 	return 0;
 }
 
+/* Attribute operations must never observe a provisional remount policy. */
+static void f2fs_commit_legacy_project_quota(struct f2fs_sb_info *sbi)
+{
+	if (test_opt(sbi, LEGACY_PROJECT_QUOTA))
+		set_sbi_flag(sbi, SBI_LEGACY_PROJECT_QUOTA);
+	else
+		clear_sbi_flag(sbi, SBI_LEGACY_PROJECT_QUOTA);
+}
+
 static void default_options(struct f2fs_sb_info *sbi, bool remount)
 {
+	/* Preserve explicit opt-in across remounts; new mounts are strict. */
+	if (!remount)
+		clear_opt(sbi, LEGACY_PROJECT_QUOTA);
+
 	/* init some FS parameters */
 	if (f2fs_sb_has_readonly(sbi))
 		F2FS_OPTION(sbi).active_logs = NR_CURSEG_RO_TYPE;
@@ -2610,6 +2636,7 @@ skip:
 	adjust_unusable_cap_perc(sbi);
 	*flags = (*flags & ~SB_LAZYTIME) | (sb->s_flags & SB_LAZYTIME);
 	f2fs_notice(sbi, "re-mounted. Opts: %s", data);
+	f2fs_commit_legacy_project_quota(sbi);
 
 	return 0;
 restore_discard:
@@ -4720,6 +4747,7 @@ reset_checkpoint:
 	f2fs_update_time(sbi, REQ_TIME);
 	clear_sbi_flag(sbi, SBI_CP_DISABLED_QUICK);
 	cleancache_init_fs(sbi->sb);
+	f2fs_commit_legacy_project_quota(sbi);
 	return 0;
 
 sync_free_meta:

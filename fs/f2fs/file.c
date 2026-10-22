@@ -2161,7 +2161,22 @@ convert_error_out:
 }
 #endif
 
-static int f2fs_setflags_common(struct inode *inode, u32 iflags, u32 mask)
+/* No project ID is stored or inherited by this opt-in legacy fallback. */
+static bool f2fs_allow_legacy_project(struct inode *inode, bool legacy_project)
+{
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+
+	if (!legacy_project || !S_ISDIR(inode->i_mode) ||
+	    !ns_capable(&init_user_ns, CAP_SYS_ADMIN))
+		return false;
+
+	if (!test_and_set_bit(SBI_LEGACY_PROJECT_QUOTA_WARNED, &sbi->s_flag))
+		f2fs_warn(sbi, "legacy_project_quota: ignoring directory project IDs and inheritance; project accounting and limits unavailable");
+	return true;
+}
+
+static int f2fs_setflags_common(struct inode *inode, u32 iflags, u32 mask,
+			      bool legacy_project)
 {
 	struct f2fs_inode_info *fi = F2FS_I(inode);
 	u32 masked_flags = fi->i_flags & mask;
@@ -2215,6 +2230,12 @@ static int f2fs_setflags_common(struct inode *inode, u32 iflags, u32 mask)
 					return -EOPNOTSUPP;
 			}
 		}
+	}
+
+	if ((iflags & F2FS_PROJINHERIT_FL) && legacy_project) {
+		if (!f2fs_allow_legacy_project(inode, legacy_project))
+			return -EPERM;
+		iflags &= ~F2FS_PROJINHERIT_FL;
 	}
 
 	fi->i_flags = iflags | (fi->i_flags & ~mask);
@@ -3307,7 +3328,8 @@ int f2fs_transfer_project_quota(struct inode *inode, kprojid_t kprojid)
 	return err;
 }
 
-static int f2fs_ioc_setproject(struct inode *inode, __u32 projid)
+static int f2fs_ioc_setproject(struct inode *inode, __u32 projid,
+			     bool legacy_project)
 {
 	struct f2fs_inode_info *fi = F2FS_I(inode);
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
@@ -3316,7 +3338,8 @@ static int f2fs_ioc_setproject(struct inode *inode, __u32 projid)
 	int err;
 
 	if (!f2fs_sb_has_project_quota(sbi)) {
-		if (projid != F2FS_DEF_PROJID)
+		if (projid != F2FS_DEF_PROJID &&
+		    !f2fs_allow_legacy_project(inode, legacy_project))
 			return -EOPNOTSUPP;
 		else
 			return 0;
@@ -3360,9 +3383,11 @@ int f2fs_transfer_project_quota(struct inode *inode, kprojid_t kprojid)
 	return 0;
 }
 
-static int f2fs_ioc_setproject(struct inode *inode, __u32 projid)
+static int f2fs_ioc_setproject(struct inode *inode, __u32 projid,
+			     bool legacy_project)
 {
-	if (projid != F2FS_DEF_PROJID)
+	if (projid != F2FS_DEF_PROJID &&
+	    !f2fs_allow_legacy_project(inode, legacy_project))
 		return -EOPNOTSUPP;
 	return 0;
 }
@@ -3395,7 +3420,11 @@ int f2fs_fileattr_set(struct user_namespace *mnt_userns,
 		      struct dentry *dentry, struct fileattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	u32 fsflags = fa->flags, mask = F2FS_SETTABLE_FS_FL;
+	/* Use one committed policy for both flags and project ID. */
+	bool legacy_project = is_sbi_flag_set(sbi, SBI_LEGACY_PROJECT_QUOTA) &&
+			      !f2fs_sb_has_project_quota(sbi);
 	u32 iflags;
 	int err;
 
@@ -3413,9 +3442,10 @@ int f2fs_fileattr_set(struct user_namespace *mnt_userns,
 	if (f2fs_mask_flags(inode->i_mode, iflags) != iflags)
 		return -EOPNOTSUPP;
 
-	err = f2fs_setflags_common(inode, iflags, f2fs_fsflags_to_iflags(mask));
+	err = f2fs_setflags_common(inode, iflags, f2fs_fsflags_to_iflags(mask),
+				   legacy_project);
 	if (!err)
-		err = f2fs_ioc_setproject(inode, fa->fsx_projid);
+		err = f2fs_ioc_setproject(inode, fa->fsx_projid, legacy_project);
 
 	return err;
 }
