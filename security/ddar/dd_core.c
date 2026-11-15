@@ -37,6 +37,9 @@
 
 #include "dd_common.h"
 
+#define DD_DUALDARD_UID 5250  /* Expected UID for dualdard daemon */
+#define DD_VENDOR_KNOXCORE_GID 5250  /* vendor_knoxcore group ID (matches UID on this system) */
+
 #define TIMEOUT_PENDING_REQ (5*1000)
 
 static struct kmem_cache *dd_req_cachep;
@@ -1094,6 +1097,8 @@ static inline void __get_md_page(struct dd_proc *proc, struct page *mdpage,
 {
 	int i = 0;
 	unsigned long metadata_area_addr = proc->metadata_vma->vm_start;
+	unsigned long md_addr;
+	int ret;
 
 	while (i < t->num_md_pg) {
 		if (t->mapped_ino[i] == ino)
@@ -1101,14 +1106,37 @@ static inline void __get_md_page(struct dd_proc *proc, struct page *mdpage,
 		i++;
 	}
 
+	md_addr = metadata_area_addr + (t->num_md_pg << PAGE_SHIFT);
+
 	dd_memory("mapping metadata area proc:%p md:%p (num_md:%d, num_ctr:%d) [ino:%ld]\n",
-			proc,
-			(void *) (metadata_area_addr + (t->num_md_pg << PAGE_SHIFT)),
-			t->num_md_pg, t->num_ctr_pg, ino);
-	remap_pfn_range(proc->metadata_vma,
-			metadata_area_addr + (t->num_md_pg << PAGE_SHIFT),
-			page_to_pfn(mdpage), PAGE_SIZE,
-			proc->metadata_vma->vm_page_prot);
+			proc, (void *)md_addr, t->num_md_pg, t->num_ctr_pg, ino);
+
+	/* SVE-2026-3092 UAF Fix: Use vm_insert_page() instead of remap_pfn_range()
+	 *
+	 * vm_insert_page() increments the page refcount, preventing page-UAF.
+	 * remap_pfn_range(VM_PFNMAP) does NOT increment refcount, leaving dangling
+	 * PTEs when the page is freed (even if info->proc becomes NULL).
+	 *
+	 * With vm_insert_page():
+	 * - Page refcount incremented on mapping
+	 * - Page cannot be freed while any PTE exists
+	 * - dd_info_try_free() simply put_page() once
+	 * - Worker's unmap (munmap/exit) automatically put_page()
+	 * - No dangling PTE possible
+	 *
+	 * This function runs in worker's own context (WAIT ioctl),
+	 * so vma->vm_mm == current->mm (safe, no cross-process locking risk).
+	 */
+	mmap_write_lock(proc->metadata_vma->vm_mm);
+	zap_vma_ptes(proc->metadata_vma, md_addr, PAGE_SIZE);
+	ret = vm_insert_page(proc->metadata_vma, md_addr, mdpage);
+	mmap_write_unlock(proc->metadata_vma->vm_mm);
+
+	if (ret) {
+		dd_error("vm_insert_page(metadata) failed ret:%d ino:%ld\n", ret, ino);
+		return;   /* mapping failed: don't update mapped_ino/num_md_pg */
+	}
+
 	t->mapped_ino[i] = ino;
 	t->num_md_pg++;
 }
@@ -1608,6 +1636,9 @@ long dd_ioctl_remove_crypto_proc(int userid)
 	return 0;
 }
 
+/* Forward declaration for dd_ioctl */
+static int dd_verify_crypto_task_caller(void);
+
 static long dd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct dd_proc *proc = (struct dd_proc *) filp->private_data;
@@ -1623,6 +1654,13 @@ static long dd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case DD_IOCTL_REGISTER_CRYPTO_TASK:
 	{
 		dd_info("DD_IOCTL_REGISTER_CRYPTO_TASK");
+
+		/* Mitigation 1: Verify only dualdard daemon can register */
+		err = dd_verify_crypto_task_caller();
+		if (err) {
+			dd_error("Crypto task registration denied: caller verification failed\n");
+			return err;
+		}
 
 		return dd_ioctl_add_crypto_proc(filp);
 	}
@@ -2008,6 +2046,61 @@ static struct miscdevice dd_miscdevice = {
 		.fops = &dd_dev_operations,
 };
 
+/* Mitigation 1: Verify caller identity for crypto task registration */
+static int dd_verify_crypto_task_caller(void)
+{
+	uid_t calling_uid = from_kuid(&init_user_ns, current_uid());
+	gid_t calling_gid = from_kgid(&init_user_ns, current_egid());
+	struct group_info *group_info;
+	int i, has_vendor_knoxcore = 0;
+
+	/* Dualdard service is configured to run as:
+	 *   user vendor_knoxcore
+	 *   group vendor_knoxcore
+	 *
+	 * Check both:
+	 * 1. Primary/effective group (current_egid)
+	 * 2. Supplementary groups (get_current_groups)
+	 */
+
+	/* Check primary/effective group */
+	if (calling_gid == DD_VENDOR_KNOXCORE_GID) {
+		has_vendor_knoxcore = 1;
+	}
+
+	/* Check supplementary groups if not found in primary */
+	if (!has_vendor_knoxcore) {
+		group_info = get_current_groups();
+		for (i = 0; i < group_info->ngroups; i++) {
+			kgid_t gid = group_info->gid[i];
+			/* Check for vendor_knoxcore group (GID 5250) */
+			if (gid.val == DD_VENDOR_KNOXCORE_GID) {
+				has_vendor_knoxcore = 1;
+				break;
+			}
+		}
+		/* FIX: Release reference acquired by get_current_groups() */
+		put_group_info(group_info);
+	}
+
+	if (!has_vendor_knoxcore) {
+		dd_error("Caller uid:%d gid:%d missing vendor_knoxcore group (expected gid:%d) for crypto task registration\n",
+				calling_uid, calling_gid, DD_VENDOR_KNOXCORE_GID);
+		return -EACCES;
+	}
+
+	/* Secondary check: verify UID matches expected dualdard UID */
+	if (calling_uid != DD_DUALDARD_UID) {
+		dd_error("Caller uid:%d does not match expected dualdard uid:%d\n",
+				calling_uid, DD_DUALDARD_UID);
+		return -EACCES;
+	}
+
+	dd_info("Crypto task registration authorized for dualdard (uid:%d, gid:vendor_knoxcore)\n",
+			calling_uid);
+	return 0;
+}
+
 static int enforce_caller_gid(uid_t uid)
 {
 	struct group_info *group_info;
@@ -2246,8 +2339,20 @@ void dd_info_try_free(struct dd_info *info)
 	dd_verbose("info refcount:%d, ino:%ld\n", atomic_read(&info->refcount), info->ino);
 	if (atomic_dec_and_test(&info->refcount)) {
 		dd_verbose("freeing dd info ino:%ld\n", info->ino);
+
+		/* SVE-2026-3092 UAF Fix: Use put_page() instead of __free_page()
+		 *
+		 * mdpage was mapped via vm_insert_page() which incremented the page
+		 * refcount. Here we simply decrement it via put_page().
+		 *
+		 * - While worker's PTE still exists, refcount > 1, page stays allocated
+		 * - When worker unmaps (munmap/exit/next request), kernel decrements refcount
+		 * - Page freed only when refcount reaches 0 (all PTEs gone)
+		 * - No dangling PTEs possible (page can't be freed while PTE exists)
+		 * - No cleanup code needed (kernel handles PTE cleanup automatically)
+		 */
 		if (info->mdpage)
-			__free_page(info->mdpage);
+			put_page(info->mdpage);
 
 		if (info->ctfm)
 			crypto_free_skcipher(info->ctfm);

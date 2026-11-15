@@ -6,6 +6,7 @@
  */
 
 #include <linux/bio.h>
+#include <linux/fs.h>
 #include "fscrypt_private.h"
 #include "ddar/ddar_crypto.h"
 
@@ -323,6 +324,14 @@ long fscrypt_dd_ioctl(unsigned int cmd, unsigned long *arg, struct inode *inode)
 	}
 	case FS_IOC_SET_DD_POLICY: {
 		struct dd_policy policy;
+
+		/* Mitigation 2: Add inode owner check - prevent arbitrary file coercion */
+		/* Only the owner or capable process (CAP_FOWNER) can set DD policy on a file */
+		if (!inode_owner_or_capable(&init_user_ns, inode)) {
+			dd_error("FS_IOC_SET_DD_POLICY denied: caller is not inode owner (ino:%ld)\n",
+					inode->i_ino);
+			return -EACCES;
+		}
 
 		if (fscrypt_dd_encrypted_inode(inode))
 			return -EEXIST;
